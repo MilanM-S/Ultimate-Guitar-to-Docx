@@ -1,9 +1,9 @@
-name: Build Mac app
+name: Build apps
 on: workflow_dispatch
 
 jobs:
-  build:
-    runs-on: macos-latest
+  mac:
+    runs-on: macos-latest        # Apple Silicon. For an Intel Mac use: macos-13
 
     steps:
       - uses: actions/checkout@v4
@@ -12,7 +12,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install python-docx pillow requests cloudscraper pyinstaller
+      - run: pip install python-docx pillow requests reportlab cloudscraper pyinstaller
 
       - name: Create macOS .icns from iconset
         run: |
@@ -22,7 +22,7 @@ jobs:
         run: >
           pyinstaller --windowed --noconfirm --name "Chord Sheet Maker"
           --icon "assets/AppIcon.icns"
-          --collect-data docx --collect-all cloudscraper ug2docx_gui.py
+          --collect-data docx --collect-all reportlab --collect-all cloudscraper ug2docx_gui.py
 
       - run: ditto -c -k --keepParent "dist/Chord Sheet Maker.app" ChordSheetMaker-mac.zip
 
@@ -30,3 +30,34 @@ jobs:
         with:
           name: ChordSheetMaker-mac
           path: ChordSheetMaker-mac.zip
+
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install python-docx pillow requests reportlab cloudscraper pyinstaller
+
+      - name: Create Windows .ico from iconset
+        shell: python
+        run: |
+          from PIL import Image
+          img = Image.open("assets/AppIcon.iconset/icon_512x512.png").convert("RGBA")
+          img.save("assets/AppIcon.ico",
+                   sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+
+      - name: Build app
+        run: >
+          pyinstaller --windowed --onefile --noconfirm --name "Chord Sheet Maker"
+          --icon "assets/AppIcon.ico"
+          --collect-data docx --collect-all reportlab --collect-all cloudscraper ug2docx_gui.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChordSheetMaker-windows
+          path: dist/Chord Sheet Maker.exe
