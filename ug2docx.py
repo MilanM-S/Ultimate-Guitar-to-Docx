@@ -22,6 +22,7 @@ Make a document:
 Transpose a document you already have (also works on your older ones):
     python ug2docx.py transpose "Song - Band.docx" +2
     python ug2docx.py transpose "Song - Band.docx" -3 --flats -o lower.docx
+    python ug2docx.py transpose "Song - Band.docx" +2 --pdf        # also save a PDF
 
 How the chords stay above the right words
     Chords are placed with Word tab stops at the exact horizontal position of
@@ -451,85 +452,95 @@ def make_docx(title, artist, sections, path, transpose=0, flats=None):
     return path
 
 
-def make_pdf(title, artist, sections, path, transpose=0, flats=None):
-    """Same layout as the Word file, drawn directly (no Word needed).
-    Uses Helvetica, which has exactly Arial's letter widths."""
+PT_PER_CM = 72 / 2.54
+
+
+def _write_pdf(path, doc_title, title_text, sections, geom=None):
+    """Low-level PDF writer shared by make_pdf and docx_to_pdf.
+    sections: list of (units, gap_rows); unit = list of paragraphs (kept together);
+    paragraph = list of (x_pt, text, bold, size). geom = (W, H, left, top, bottom) in pt."""
     from reportlab.pdfgen import canvas
 
-    PT_PER_CM = 72 / 2.54
-    W, H = PAGE_WIDTH_CM * PT_PER_CM, PAGE_HEIGHT_CM * PT_PER_CM
-    margin = MARGIN_CM * PT_PER_CM
-    text_w = W - 2 * margin
+    m = MARGIN_CM * PT_PER_CM
+    W, H, left, top, bottom = geom or (PAGE_WIDTH_CM * PT_PER_CM, PAGE_HEIGHT_CM * PT_PER_CM, m, m, m)
     line = lambda size: size * 1.149 * LINE_SPACING          # Arial line height x spacing
     row = line(BODY_SIZE) + SPACE_AFTER_PT
     clean = lambda t: t.encode("cp1252", "replace").decode("cp1252")
 
-    sections = prepare(sections, transpose, flats)
-    meas = Measurer()
     c = canvas.Canvas(path, pagesize=(W, H))
-    c.setTitle(f"{title} - {artist}")
+    c.setTitle(doc_title)
+    state = {"y": H - top}
 
-    def draw_text(x, y_top, text, bold=False, size=BODY_SIZE):
+    def draw(x, y_top, text, bold, size):
         c.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-        c.drawString(margin + x, y_top - line(size) + 0.27 * size, clean(text))
+        c.drawString(left + x, y_top - line(size) + 0.27 * size, clean(text))
 
-    y = H - margin
-    draw_text(0, y, f"{title} \u2013 {artist}", bold=True, size=TITLE_SIZE)
-    y -= line(TITLE_SIZE)
+    def newpage():
+        c.showPage()
+        state["y"] = H - top
 
-    for header, items in sections:
-        units = []                                   # each unit = list of drawing ops
-        if header:
-            units.append([("text", header, False)])
-        for it in items:
-            if it[0] == "pair":
-                units.append([("chords", place_chords(it[1], it[2], meas, text_w)),
-                              ("text", it[2], False)])
-            elif it[0] == "chords":
-                units.append([("text", " ".join(it[1]), True)])
-            else:
-                units.append([("text", it[1], False)])
+    if title_text:
+        draw(0, state["y"], title_text, True, TITLE_SIZE)
+        state["y"] -= line(TITLE_SIZE)
+
+    for units, gap in sections:
         total = sum(len(u) for u in units) * row - SPACE_AFTER_PT
-        if total > y - margin and total <= H - 2 * margin:
-            c.showPage()
-            y = H - margin
+        if units and total > state["y"] - bottom and total <= H - top - bottom:
+            newpage()                                # whole section moves to the next page
         for u in units:
             need = len(u) * row - SPACE_AFTER_PT
-            if y - need < margin:
-                c.showPage()
-                y = H - margin
-            for op in u:
-                if op[0] == "chords":
-                    for x, chord in op[1]:
-                        draw_text(x, y, chord, bold=True)
-                else:
-                    draw_text(0, y, op[1], bold=op[2])
-                y -= row
-        y -= row                                     # empty line between sections
+            if state["y"] - need < bottom:
+                newpage()
+            for par in u:
+                for x, text, bold, size in par:
+                    draw(x, state["y"], text, bold, size)
+                state["y"] -= row
+        state["y"] -= row * gap
     c.save()
     return path
+
+
+def make_pdf(title, artist, sections, path, transpose=0, flats=None):
+    """Same layout as the Word file, drawn directly (no Word needed).
+    Uses Helvetica, which has exactly Arial's letter widths."""
+    text_w = (PAGE_WIDTH_CM - 2 * MARGIN_CM) * PT_PER_CM
+    sections = prepare(sections, transpose, flats)
+    meas = Measurer()
+    out = []
+    for header, items in sections:
+        units = []
+        if header:
+            units.append([[(0, header, False, BODY_SIZE)]])
+        for it in items:
+            if it[0] == "pair":
+                chords = [(x, ch, True, BODY_SIZE) for x, ch in place_chords(it[1], it[2], meas, text_w)]
+                units.append([chords, [(0, it[2], False, BODY_SIZE)]])
+            elif it[0] == "chords":
+                units.append([[(0, " ".join(it[1]), True, BODY_SIZE)]])
+            else:
+                units.append([[(0, it[1], False, BODY_SIZE)]])
+        out.append((units, 1))
+    return _write_pdf(path, f"{title} - {artist}", f"{title} \u2013 {artist}", out)
 
 
 # --------------------------------------------------------------------------
 # Transposing an existing .docx
 # --------------------------------------------------------------------------
+def _is_chord_par(par):
+    rs = [r for r in par.runs if r.text.strip()]
+    if not rs or not all(r.bold for r in rs):
+        return False
+    if any(r.font.size and r.font.size.pt > BODY_SIZE + 1 for r in rs):
+        return False                          # the title
+    tokens = " ".join(r.text for r in rs).split()
+    return bool(tokens) and all(is_chord(t) for t in tokens)
+
+
 def transpose_docx(src, steps, dst, flats=None):
     from docx import Document
     doc = Document(src)
 
-    def runs_text(par):
-        return [r for r in par.runs if r.text.strip()]
-
-    def is_chord_par(par):
-        rs = runs_text(par)
-        if not rs or not all(r.bold for r in rs):
-            return False
-        if any(r.font.size and r.font.size.pt > BODY_SIZE + 1 for r in rs):
-            return False                      # the title
-        tokens = " ".join(r.text for r in rs).split()
-        return bool(tokens) and all(is_chord(t) for t in tokens)
-
-    chord_pars = [p for p in doc.paragraphs if is_chord_par(p)]
+    chord_pars = [p for p in doc.paragraphs if _is_chord_par(p)]
     if flats is None:
         toks = [t for p in chord_pars for t in p.text.split() if is_chord(t)]
         flats = auto_flats([transpose_chord(t, steps, False) for t in toks])
@@ -552,6 +563,61 @@ def transpose_docx(src, steps, dst, flats=None):
             r.text = pattern.sub(repl, r.text)
     doc.save(dst)
     return len(chord_pars)
+
+
+def docx_to_pdf(src, dst):
+    """PDF of a chord-sheet .docx (made by this tool or by hand): reads the
+    paragraphs, tab stops and bold runs and draws them with the same layout rules
+    (sections kept together on a page)."""
+    from docx import Document
+    doc = Document(src)
+    meas = Measurer()
+    pars = doc.paragraphs
+
+    def items(par):
+        stops = sorted(ts.position.pt for ts in par.paragraph_format.tab_stops)
+        x, out = 0.0, []
+        for r in par.runs:
+            bold = bool(r.bold)
+            size = r.font.size.pt if r.font.size else BODY_SIZE
+            for piece in re.split(r"(\t)", r.text):
+                if piece == "\t":
+                    nxt = [t for t in stops if t > x + 0.5]
+                    x = nxt[0] if nxt else (int(x // 36) + 1) * 36
+                elif piece:
+                    out.append((x, piece, bold, size))
+                    x += meas.width(piece, bold, size)
+        return out
+
+    title_text, start = None, 0
+    if pars and pars[0].text.strip() and any(r.font.size and r.font.size.pt > BODY_SIZE + 1 for r in pars[0].runs):
+        title_text, start = pars[0].text.strip(), 1
+
+    sections, units, i = [], [], start          # sections: [units, blank_rows_after]
+    while i < len(pars):
+        par = pars[i]
+        if not par.text.strip():                 # blank paragraph = gap after the section
+            if units:
+                sections.append([units, 0])
+                units = []
+            if sections:
+                sections[-1][1] += 1
+            else:
+                sections.append([[], 1])
+            i += 1
+            continue
+        group = [items(par)]
+        if _is_chord_par(par) and i + 1 < len(pars) and pars[i + 1].text.strip() \
+                and not _is_chord_par(pars[i + 1]):
+            group.append(items(pars[i + 1]))     # chord line stays with its lyric line
+            i += 1
+        units.append(group)
+        i += 1
+    if units:
+        sections.append([units, 0])
+    s0 = doc.sections[0]
+    geom = (s0.page_width.pt, s0.page_height.pt, s0.left_margin.pt, s0.top_margin.pt, s0.bottom_margin.pt)
+    return _write_pdf(dst, os.path.splitext(os.path.basename(dst))[0], title_text, sections, geom)
 
 
 # --------------------------------------------------------------------------
@@ -598,6 +664,10 @@ def cmd_transpose(a):
     n = transpose_docx(a.file, int(a.steps), out,
                        flats=True if a.flats else (False if a.sharps else None))
     print(f"Transposed {n} chord lines by {int(a.steps):+d} semitones -> {out}")
+    if a.pdf:
+        pdf = os.path.splitext(out)[0] + ".pdf"
+        docx_to_pdf(out, pdf)
+        print(f"Saved: {pdf}")
 
 
 def main():
@@ -621,6 +691,7 @@ def main():
     t = sub.add_parser("transpose", help="transpose the chords of an existing .docx")
     t.add_argument("file"), t.add_argument("steps", help="semitones, e.g. +2 or -3")
     t.add_argument("-o", "--output", help="default: overwrite the file")
+    t.add_argument("--pdf", action="store_true", help="also save a PDF of the transposed document")
     g = t.add_mutually_exclusive_group()
     g.add_argument("--flats", action="store_true"), g.add_argument("--sharps", action="store_true")
     t.set_defaults(func=cmd_transpose)

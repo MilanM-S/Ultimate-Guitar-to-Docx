@@ -183,8 +183,11 @@ class App(tk.Tk):
         self.t_acc = tk.StringVar(value="auto")
         self._transpose_controls(t, 1, self.t_steps, self.t_acc)
 
+        self.t_pdf = tk.BooleanVar(value=True)
+        ttk.Checkbutton(t, text="Also save a PDF", variable=self.t_pdf).grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=(10, 0))
         ttk.Button(t, text="Transpose and save a copy", command=self.transpose).grid(
-            row=4, column=0, columnspan=3, pady=(18, 0), ipadx=12, ipady=4)
+            row=4, column=0, columnspan=3, pady=(16, 0), ipadx=12, ipady=4)
 
     def pick_doc(self):
         p = filedialog.askopenfilename(title="Chord sheet (.docx)",
@@ -212,11 +215,16 @@ class App(tk.Tk):
         try:
             n = core.transpose_docx(self.doc_path, steps, path,
                                     flats=self._flats_value(self.t_acc.get()))
+            pdf = None
+            if self.t_pdf.get():
+                pdf = os.path.splitext(path)[0] + ".pdf"
+                core.docx_to_pdf(path, pdf)
         except Exception as e:
             self.fail(str(e))
             return
         self.status.set(f"Transposed {n} chord lines by {steps:+d}.")
-        if messagebox.askyesno("Done", f"Transposed {n} chord lines.\n\nOpen the copy now?"):
+        saved = os.path.basename(path) + (f" and {os.path.basename(pdf)}" if pdf else "")
+        if messagebox.askyesno("Done", f"Transposed {n} chord lines.\nSaved {saved}.\n\nOpen the Word copy now?"):
             open_file(path)
 
 
