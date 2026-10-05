@@ -33,8 +33,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Chord Sheet Maker")
-        self.geometry("560x330")
-        self.minsize(520, 320)
+        self.geometry("580x400")
+        self.minsize(540, 390)
         self.html_path = None
         self.doc_path = None
 
@@ -87,8 +87,15 @@ class App(tk.Tk):
         self.acc = tk.StringVar(value="auto")
         self._transpose_controls(t, 2, self.steps, self.acc)
 
+        self.fix_capo = tk.BooleanVar(value=True)
+        self.want_pdf = tk.BooleanVar(value=True)
+        ttk.Checkbutton(t, text="Convert capo chords to the original key",
+                        variable=self.fix_capo).grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Checkbutton(t, text="Also save a PDF", variable=self.want_pdf).grid(
+            row=5, column=0, columnspan=3, sticky="w")
+
         self.go = ttk.Button(t, text="Create Word document", command=self.make)
-        self.go.grid(row=5, column=0, columnspan=3, pady=(18, 0), ipadx=12, ipady=4)
+        self.go.grid(row=6, column=0, columnspan=3, pady=(16, 0), ipadx=12, ipady=4)
 
     def pick_html(self):
         p = filedialog.askopenfilename(title="Saved Ultimate Guitar page",
@@ -126,7 +133,10 @@ class App(tk.Tk):
         threading.Thread(target=work, daemon=True).start()
 
     def finish_make(self, result, steps):
-        title, artist, content = result
+        title, artist, content, meta_capo = result
+        capo = core.detect_capo(content, meta_capo)
+        if self.fix_capo.get():
+            steps += capo
         default = f"{core.safe_filename(title)} - {core.safe_filename(artist)}.docx"
         path = filedialog.asksaveasfilename(
             title="Save Word document", initialfile=default, defaultextension=".docx",
@@ -136,13 +146,23 @@ class App(tk.Tk):
             self.status.set("Cancelled.")
             return
         try:
-            core.make_docx(title, artist, core.build_sections(content), path,
-                           transpose=steps, flats=self._flats_value(self.acc.get()))
+            sections = core.build_sections(content)
+            flats = self._flats_value(self.acc.get())
+            core.make_docx(title, artist, sections, path, transpose=steps, flats=flats)
+            saved = [os.path.basename(path)]
+            if self.want_pdf.get():
+                pdf = os.path.splitext(path)[0] + ".pdf"
+                core.make_pdf(title, artist, sections, pdf, transpose=steps, flats=flats)
+                saved.append(os.path.basename(pdf))
         except Exception as e:
             self.fail(str(e))
             return
-        self.status.set(f"Saved: {os.path.basename(path)}")
-        if messagebox.askyesno("Done", f"Saved {os.path.basename(path)}.\n\nOpen it now?"):
+        note = ""
+        if capo:
+            note = (f"\nCapo {capo} found: " + ("chords raised to the original key." if self.fix_capo.get()
+                    else "kept as on the page."))
+        self.status.set("Saved: " + ", ".join(saved))
+        if messagebox.askyesno("Done", "Saved " + " and ".join(saved) + "." + note + "\n\nOpen the Word file now?"):
             open_file(path)
 
     def fail(self, msg):
