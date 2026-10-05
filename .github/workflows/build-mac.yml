@@ -1,0 +1,19 @@
+name: Build Mac app
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install python-docx pillow requests cloudscraper pyinstaller
+      - run: >
+          pyinstaller --windowed --noconfirm --name "Chord Sheet Maker"
+          --collect-data docx --collect-all cloudscraper ug2docx_gui.py
+      - run: ditto -c -k --keepParent "dist/Chord Sheet Maker.app" ChordSheetMaker-mac.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChordSheetMaker-mac
+          path: ChordSheetMaker-mac.zip
