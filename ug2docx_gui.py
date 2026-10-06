@@ -33,8 +33,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Chord Sheet Maker")
-        self.geometry("580x400")
-        self.minsize(540, 390)
+        self.geometry("620x430")
+        self.minsize(600, 420)
         self.html_path = None
         self.doc_path = None
 
@@ -91,11 +91,27 @@ class App(tk.Tk):
         self.want_pdf = tk.BooleanVar(value=True)
         ttk.Checkbutton(t, text="Convert capo chords to the original key",
                         variable=self.fix_capo).grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self.autofit = tk.BooleanVar(value=True)
+        self.size = tk.StringVar(value="12")
+        fit = ttk.Frame(t)
+        fit.grid(row=5, column=0, columnspan=3, sticky="w")
+        ttk.Checkbutton(fit, text="Auto-fit text size (8-12 pt) to use the fewest pages",
+                        variable=self.autofit, command=self._toggle_size).pack(side="left")
+        ttk.Label(fit, text="   Text size:").pack(side="left")
+        self.size_box = ttk.Spinbox(fit, from_=6, to=16, increment=0.5, width=5,
+                                    textvariable=self.size)
+        self.size_box.pack(side="left", padx=(4, 2))
+        ttk.Label(fit, text="pt").pack(side="left")
+        self._toggle_size()
         ttk.Checkbutton(t, text="Also save a PDF", variable=self.want_pdf).grid(
-            row=5, column=0, columnspan=3, sticky="w")
+            row=6, column=0, columnspan=3, sticky="w")
 
         self.go = ttk.Button(t, text="Create Word document", command=self.make)
-        self.go.grid(row=6, column=0, columnspan=3, pady=(16, 0), ipadx=12, ipady=4)
+        self.go.grid(row=7, column=0, columnspan=3, pady=(16, 0), ipadx=12, ipady=4)
+
+    def _toggle_size(self):
+        """The manual size box is only usable when auto-fit is off."""
+        self.size_box.config(state="disabled" if self.autofit.get() else "normal")
 
     def pick_html(self):
         p = filedialog.askopenfilename(title="Saved Ultimate Guitar page",
@@ -114,6 +130,13 @@ class App(tk.Tk):
         except ValueError:
             messagebox.showwarning("Transpose", "Transpose must be a whole number, e.g. -2 or 3.")
             return
+        if not self.autofit.get():
+            try:
+                if not 6 <= float(self.size.get()) <= 16:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning("Text size", "Text size must be a number between 6 and 16.")
+                return
         use_url = bool(url)
         self.go.config(state="disabled")
         self.status.set("Downloading chord sheet…")
@@ -148,18 +171,21 @@ class App(tk.Tk):
         try:
             sections = core.build_sections(content)
             flats = self._flats_value(self.acc.get())
-            core.make_docx(title, artist, sections, path, transpose=steps, flats=flats)
+            manual = 12.0 if self.autofit.get() else float(self.size.get())
+            size, pages = core.plan_layout(title, artist, sections, steps, flats,
+                                           autofit=self.autofit.get(), size=manual)
+            core.make_docx(title, artist, sections, path, transpose=steps, flats=flats, size=size)
             saved = [os.path.basename(path)]
             if self.want_pdf.get():
                 pdf = os.path.splitext(path)[0] + ".pdf"
-                core.make_pdf(title, artist, sections, pdf, transpose=steps, flats=flats)
+                core.make_pdf(title, artist, sections, pdf, transpose=steps, flats=flats, size=size)
                 saved.append(os.path.basename(pdf))
         except Exception as e:
             self.fail(str(e))
             return
-        note = ""
+        note = f"\nText size {size:g} pt, {pages} page{'s' if pages != 1 else ''}."
         if capo:
-            note = (f"\nCapo {capo} found: " + ("chords raised to the original key." if self.fix_capo.get()
+            note += (f"\nCapo {capo} found: " + ("chords raised to the original key." if self.fix_capo.get()
                     else "kept as on the page."))
         self.status.set("Saved: " + ", ".join(saved))
         if messagebox.askyesno("Done", "Saved " + " and ".join(saved) + "." + note + "\n\nOpen the Word file now?"):
