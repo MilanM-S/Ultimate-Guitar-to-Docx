@@ -13,6 +13,7 @@ Make a document:
     python ug2docx.py make URL --transpose -2          # 2 semitones down
     python ug2docx.py make URL --flats                 # use Bb instead of A#
     python ug2docx.py make URL --pdf                   # also save a PDF
+    python ug2docx.py make URL --size 12               # fixed size (default: auto-fit 8-12 pt)
     python ug2docx.py make URL --keep-capo             # keep the guitar/capo chords
     python ug2docx.py make --html saved_page.html      # if the download is blocked,
                                                        # save the page in your browser
@@ -54,6 +55,7 @@ SPACE_AFTER_PT = 6
 PAGE_WIDTH_CM, PAGE_HEIGHT_CM = 21.0, 29.7      # A4 (US Letter: 21.59, 27.94)
 MARGIN_CM = 2.54                                 # 1 inch
 MIN_CHORD_GAP_PT = 4                             # minimum gap between two chords
+MIN_SIZE, MAX_SIZE, SIZE_STEP = 8, 12, 0.5       # auto-fit tries these body sizes
 
 # --------------------------------------------------------------------------
 # Chord parsing / transposition
@@ -359,21 +361,21 @@ def prepare(sections, steps=0, flats=None):
     return out
 
 
-def place_chords(chords, lyric, meas, max_x):
+def place_chords(chords, lyric, meas, max_x, size=BODY_SIZE):
     """[(col, chord)] -> [(x_in_points, chord)] so chords sit over their letters."""
     out, prev_end = [], None
     for col, chord in chords:
         padded = lyric if col <= len(lyric) else lyric + " " * (col - len(lyric))
-        x = meas.width(padded[:col])
+        x = meas.width(padded[:col], size=size)
         if prev_end is not None:
             x = max(x, prev_end + MIN_CHORD_GAP_PT)
         x = min(x, max_x - 10)
         out.append((x, chord))
-        prev_end = x + meas.width(chord, bold=True)
+        prev_end = x + meas.width(chord, bold=True, size=size)
     return out
 
 
-def make_docx(title, artist, sections, path, transpose=0, flats=None):
+def make_docx(title, artist, sections, path, transpose=0, flats=None, size=BODY_SIZE):
     from docx import Document
     from docx.enum.text import WD_TAB_ALIGNMENT
     from docx.oxml.ns import qn
@@ -390,7 +392,7 @@ def make_docx(title, artist, sections, path, transpose=0, flats=None):
 
     normal = doc.styles["Normal"]
     normal.font.name = FONT_NAME
-    normal.font.size = Pt(BODY_SIZE)
+    normal.font.size = Pt(size)
     rfonts = normal.element.get_or_add_rPr().find(qn("w:rFonts"))
     for attr in ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia"):
         rfonts.set(qn(attr), FONT_NAME)
@@ -398,23 +400,23 @@ def make_docx(title, artist, sections, path, transpose=0, flats=None):
     normal.paragraph_format.space_after = Pt(SPACE_AFTER_PT)
     normal.paragraph_format.space_before = Pt(0)
 
-    def run(par, text, bold=False, size=BODY_SIZE):
+    def run(par, text, bold=False, sz=None):
         r = par.add_run(text)
         r.font.name = FONT_NAME
-        r.font.size = Pt(size)
+        r.font.size = Pt(sz or size)
         r.bold = bold
         r._element.rPr.rFonts.set(qn("w:eastAsia"), FONT_NAME)
         return r
 
-    # Title: "Song Title - Artist", Arial 18 bold
+    # Title: "Song Title - Artist", Arial 18 bold (always 18, whatever the body size)
     p = doc.add_paragraph()
     p.paragraph_format.space_after = Pt(0)
     p.paragraph_format.keep_with_next = True
-    run(p, f"{title} \u2013 {artist}", bold=True, size=TITLE_SIZE)
+    run(p, f"{title} \u2013 {artist}", bold=True, sz=TITLE_SIZE)
 
     def chord_par(chords, lyric):
         par = doc.add_paragraph()
-        for x, chord in place_chords(chords, lyric, meas, text_width_pt):
+        for x, chord in place_chords(chords, lyric, meas, text_width_pt, size):
             if x < 1:                       # chord at the very start of the line
                 run(par, chord, bold=True)
             else:
@@ -422,7 +424,7 @@ def make_docx(title, artist, sections, path, transpose=0, flats=None):
                 run(par, "\t" + chord, bold=True)
         return par
 
-    for header, items in sections:
+    for n, (header, items) in enumerate(sections):
         block = []
         if header:
             hp = doc.add_paragraph()
@@ -446,81 +448,132 @@ def make_docx(title, artist, sections, path, transpose=0, flats=None):
         for idx, par in enumerate(block):
             par.paragraph_format.keep_together = True
             par.paragraph_format.keep_with_next = idx < len(block) - 1
-        doc.add_paragraph()                  # empty spacer between sections
+        if n < len(sections) - 1:
+            doc.add_paragraph()              # empty spacer between sections
 
     doc.save(path)
     return path
 
 
 PT_PER_CM = 72 / 2.54
+_line = lambda size: size * 1.149 * LINE_SPACING            # Arial line height x spacing
 
 
-def _write_pdf(path, doc_title, title_text, sections, geom=None):
+def _default_geom():
+    m = MARGIN_CM * PT_PER_CM
+    return (PAGE_WIDTH_CM * PT_PER_CM, PAGE_HEIGHT_CM * PT_PER_CM, m, m, m)
+
+
+def _layout(sections, body_size, has_title, geom):
+    """Decide which page and height every paragraph lands on.
+    sections: list of (units, gap_rows); unit = list of paragraphs kept together.
+    Returns (placements [(page, y_top, paragraph)], page_count)."""
+    W, H, left, top, bottom = geom
+    row = _line(body_size) + SPACE_AFTER_PT
+    page, y = 0, H - top - (_line(TITLE_SIZE) if has_title else 0)
+    placed = []
+    for units, gap in sections:
+        total = sum(len(u) for u in units) * row - SPACE_AFTER_PT
+        if units and total > y - bottom and total <= H - top - bottom:
+            page, y = page + 1, H - top            # whole section moves to the next page
+        for u in units:
+            need = len(u) * row - SPACE_AFTER_PT
+            if y - need < bottom:
+                page, y = page + 1, H - top
+            for par in u:
+                placed.append((page, y, par))
+                y -= row
+        y -= row * gap
+    return placed, page + 1
+
+
+def _write_pdf(path, doc_title, title_text, sections, geom=None, body_size=BODY_SIZE):
     """Low-level PDF writer shared by make_pdf and docx_to_pdf.
-    sections: list of (units, gap_rows); unit = list of paragraphs (kept together);
     paragraph = list of (x_pt, text, bold, size). geom = (W, H, left, top, bottom) in pt."""
     from reportlab.pdfgen import canvas
 
-    m = MARGIN_CM * PT_PER_CM
-    W, H, left, top, bottom = geom or (PAGE_WIDTH_CM * PT_PER_CM, PAGE_HEIGHT_CM * PT_PER_CM, m, m, m)
-    line = lambda size: size * 1.149 * LINE_SPACING          # Arial line height x spacing
-    row = line(BODY_SIZE) + SPACE_AFTER_PT
+    geom = geom or _default_geom()
+    W, H, left, top, bottom = geom
     clean = lambda t: t.encode("cp1252", "replace").decode("cp1252")
+    placed, pages = _layout(sections, body_size, bool(title_text), geom)
 
     c = canvas.Canvas(path, pagesize=(W, H))
     c.setTitle(doc_title)
-    state = {"y": H - top}
 
     def draw(x, y_top, text, bold, size):
         c.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-        c.drawString(left + x, y_top - line(size) + 0.27 * size, clean(text))
-
-    def newpage():
-        c.showPage()
-        state["y"] = H - top
+        c.drawString(left + x, y_top - _line(size) + 0.27 * size, clean(text))
 
     if title_text:
-        draw(0, state["y"], title_text, True, TITLE_SIZE)
-        state["y"] -= line(TITLE_SIZE)
-
-    for units, gap in sections:
-        total = sum(len(u) for u in units) * row - SPACE_AFTER_PT
-        if units and total > state["y"] - bottom and total <= H - top - bottom:
-            newpage()                                # whole section moves to the next page
-        for u in units:
-            need = len(u) * row - SPACE_AFTER_PT
-            if state["y"] - need < bottom:
-                newpage()
-            for par in u:
-                for x, text, bold, size in par:
-                    draw(x, state["y"], text, bold, size)
-                state["y"] -= row
-        state["y"] -= row * gap
+        draw(0, H - top, title_text, True, TITLE_SIZE)
+    page = 0
+    for pg, y, par in placed:
+        while page < pg:
+            c.showPage()
+            page += 1
+        for x, text, bold, size in par:
+            draw(x, y, text, bold, size)
     c.save()
     return path
 
 
-def make_pdf(title, artist, sections, path, transpose=0, flats=None):
+def _pdf_sections(prepared, size, meas, text_w):
+    """Prepared sections -> drawing paragraphs at a given body size.
+    Also returns the widest line (points), to spot lines that would wrap."""
+    out, widest = [], 0.0
+    for header, items in prepared:
+        units = []
+        if header:
+            units.append([[(0, header, False, size)]])
+            widest = max(widest, meas.width(header, False, size))
+        for it in items:
+            if it[0] == "pair":
+                placed = place_chords(it[1], it[2], meas, text_w, size)
+                units.append([[(x, ch, True, size) for x, ch in placed], [(0, it[2], False, size)]])
+                widest = max(widest, meas.width(it[2], False, size))
+                if placed:
+                    widest = max(widest, placed[-1][0] + meas.width(placed[-1][1], True, size))
+            elif it[0] == "chords":
+                t = " ".join(it[1])
+                units.append([[(0, t, True, size)]])
+                widest = max(widest, meas.width(t, True, size))
+            else:
+                units.append([[(0, it[1], False, size)]])
+                widest = max(widest, meas.width(it[1], False, size))
+        out.append((units, 1))
+    return out, widest
+
+
+def plan_layout(title, artist, sections, transpose=0, flats=None, autofit=True, size=BODY_SIZE):
+    """Try body sizes from MAX_SIZE down to MIN_SIZE and pick the one that needs the
+    fewest pages (largest size wins a tie). Sizes where a line would be too wide for
+    the page (and wrap, breaking the chord alignment) are skipped when possible.
+    Returns (size, pages)."""
+    prepared = prepare(sections, transpose, flats)
+    meas = Measurer()
+    text_w = (PAGE_WIDTH_CM - 2 * MARGIN_CM) * PT_PER_CM
+    if autofit:
+        n = int(round((MAX_SIZE - MIN_SIZE) / SIZE_STEP))
+        sizes = [MAX_SIZE - i * SIZE_STEP for i in range(n + 1)]
+    else:
+        sizes = [size]
+    results = []
+    for sz in sizes:
+        secs, widest = _pdf_sections(prepared, sz, meas, text_w)
+        _, pages = _layout(secs, sz, True, _default_geom())
+        results.append((widest <= text_w, pages, sz))
+    fitting = [r for r in results if r[0]]
+    best = min(fitting, key=lambda r: (r[1], -r[2])) if fitting else results[-1]
+    return best[2], best[1]
+
+
+def make_pdf(title, artist, sections, path, transpose=0, flats=None, size=BODY_SIZE):
     """Same layout as the Word file, drawn directly (no Word needed).
     Uses Helvetica, which has exactly Arial's letter widths."""
     text_w = (PAGE_WIDTH_CM - 2 * MARGIN_CM) * PT_PER_CM
-    sections = prepare(sections, transpose, flats)
-    meas = Measurer()
-    out = []
-    for header, items in sections:
-        units = []
-        if header:
-            units.append([[(0, header, False, BODY_SIZE)]])
-        for it in items:
-            if it[0] == "pair":
-                chords = [(x, ch, True, BODY_SIZE) for x, ch in place_chords(it[1], it[2], meas, text_w)]
-                units.append([chords, [(0, it[2], False, BODY_SIZE)]])
-            elif it[0] == "chords":
-                units.append([[(0, " ".join(it[1]), True, BODY_SIZE)]])
-            else:
-                units.append([[(0, it[1], False, BODY_SIZE)]])
-        out.append((units, 1))
-    return _write_pdf(path, f"{title} - {artist}", f"{title} \u2013 {artist}", out)
+    prepared = prepare(sections, transpose, flats)
+    secs, _ = _pdf_sections(prepared, size, Measurer(), text_w)
+    return _write_pdf(path, f"{title} - {artist}", f"{title} \u2013 {artist}", secs, body_size=size)
 
 
 # --------------------------------------------------------------------------
@@ -530,7 +583,7 @@ def _is_chord_par(par):
     rs = [r for r in par.runs if r.text.strip()]
     if not rs or not all(r.bold for r in rs):
         return False
-    if any(r.font.size and r.font.size.pt > BODY_SIZE + 1 for r in rs):
+    if any(r.font.size and r.font.size.pt >= TITLE_SIZE for r in rs):
         return False                          # the title
     tokens = " ".join(r.text for r in rs).split()
     return bool(tokens) and all(is_chord(t) for t in tokens)
@@ -590,8 +643,11 @@ def docx_to_pdf(src, dst):
         return out
 
     title_text, start = None, 0
-    if pars and pars[0].text.strip() and any(r.font.size and r.font.size.pt > BODY_SIZE + 1 for r in pars[0].runs):
+    if pars and pars[0].text.strip() and any(r.font.size and r.font.size.pt >= TITLE_SIZE for r in pars[0].runs):
         title_text, start = pars[0].text.strip(), 1
+
+    sizes = [r.font.size.pt for p in pars[start:] for r in p.runs if r.text.strip() and r.font.size]
+    body_size = max(set(sizes), key=sizes.count) if sizes else BODY_SIZE
 
     sections, units, i = [], [], start          # sections: [units, blank_rows_after]
     while i < len(pars):
@@ -617,7 +673,7 @@ def docx_to_pdf(src, dst):
         sections.append([units, 0])
     s0 = doc.sections[0]
     geom = (s0.page_width.pt, s0.page_height.pt, s0.left_margin.pt, s0.top_margin.pt, s0.bottom_margin.pt)
-    return _write_pdf(dst, os.path.splitext(os.path.basename(dst))[0], title_text, sections, geom)
+    return _write_pdf(dst, os.path.splitext(os.path.basename(dst))[0], title_text, sections, geom, body_size)
 
 
 # --------------------------------------------------------------------------
@@ -650,12 +706,15 @@ def cmd_make(a):
 
     sections = build_sections(content)
     flats = True if a.flats else (False if a.sharps else None)
+    size, pages = plan_layout(title, artist, sections, shift, flats,
+                              autofit=a.size is None, size=a.size or BODY_SIZE)
+    print(f"Text size {size:g} pt -> {pages} page{'s' if pages != 1 else ''}.")
     out = a.output or f"{safe_filename(title)} - {safe_filename(artist)}.docx"
-    make_docx(title, artist, sections, out, transpose=shift, flats=flats)
+    make_docx(title, artist, sections, out, transpose=shift, flats=flats, size=size)
     print(f"Saved: {out}")
     if a.pdf:
         pdf = os.path.splitext(out)[0] + ".pdf"
-        make_pdf(title, artist, sections, pdf, transpose=shift, flats=flats)
+        make_pdf(title, artist, sections, pdf, transpose=shift, flats=flats, size=size)
         print(f"Saved: {pdf}")
 
 
@@ -682,6 +741,8 @@ def main():
     m.add_argument("-o", "--output")
     m.add_argument("--transpose", type=int, default=0, metavar="N", help="semitones, e.g. -2 or 3")
     m.add_argument("--pdf", action="store_true", help="also save a PDF next to the Word file")
+    m.add_argument("--size", type=float, metavar="PT",
+                   help="fixed text size, e.g. 12 (default: auto-fit between 8 and 12 for the fewest pages)")
     m.add_argument("--keep-capo", action="store_true",
                    help="keep the capo/guitar chords instead of converting to the original key")
     g = m.add_mutually_exclusive_group()
