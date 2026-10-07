@@ -17,6 +17,36 @@ from tkinter import filedialog, messagebox, ttk
 import ug2docx as core
 
 
+def resource_path(rel):
+    """Find a bundled file, both when run as a script and inside the packaged app."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, rel)
+
+
+def system_is_dark():
+    """True if the operating system is set to dark mode."""
+    forced = os.environ.get("CSM_THEME")          # for testing: CSM_THEME=dark / light
+    if forced:
+        return forced == "dark"
+    try:
+        if sys.platform.startswith("win"):
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+            return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+        if sys.platform == "darwin":
+            r = subprocess.run(["defaults", "read", "-g", "AppleInterfaceStyle"],
+                               capture_output=True, text=True)
+            return "Dark" in r.stdout
+    except Exception:
+        pass
+    return False
+
+
+DARK = dict(bg="#202020", fg="#f0f0f0", field="#2b2b2b", border="#454545", btn="#333333",
+            btn_hot="#404040", accent="#4c9aff", muted="#a0a0a0", tab="#2a2a2a")
+
+
 def open_file(path):
     try:
         if sys.platform == "darwin":
@@ -31,7 +61,19 @@ def open_file(path):
 
 class App(tk.Tk):
     def __init__(self):
+        if sys.platform.startswith("win"):
+            try:   # own taskbar identity, so Windows shows our icon and not Python's feather
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ChordSheetMaker.App")
+            except Exception:
+                pass
         super().__init__()
+        self.style = ttk.Style()
+        self._native_theme = self.style.theme_use()
+        self._default_bg = self.cget("bg")
+        self._dark = None
+        self._themed = sys.platform.startswith("win") or bool(os.environ.get("CSM_THEME"))
+        self._set_icon()
         self.title("Chord Sheet Maker")
         self.geometry("620x430")
         self.minsize(600, 420)
@@ -48,15 +90,89 @@ class App(tk.Tk):
         self._build_transpose_tab()
 
         self.status = tk.StringVar(value="Ready.")
-        ttk.Label(self, textvariable=self.status, foreground="#555").pack(
+        ttk.Label(self, textvariable=self.status, style="Muted.TLabel").pack(
             fill="x", padx=12, pady=(0, 8))
+
+        self._poll_theme()
+
+    # ---------------- icon and theme ----------------
+    def _set_icon(self):
+        try:
+            ico = resource_path(os.path.join("assets", "AppIcon.ico"))
+            png = resource_path(os.path.join("assets", "AppIcon.iconset", "icon_256x256.png"))
+            if sys.platform.startswith("win") and os.path.exists(ico):
+                self.iconbitmap(default=ico)
+            elif os.path.exists(png):
+                self._icon_img = tk.PhotoImage(file=png)
+                self.iconphoto(True, self._icon_img)
+        except Exception:
+            pass
+
+    def _poll_theme(self):
+        """Follow the system light/dark setting, also while the app is open."""
+        if self._themed:
+            dark = system_is_dark()
+            if dark != self._dark:
+                self._dark = dark
+                self.apply_theme(dark)
+            self.after(2000, self._poll_theme)
+        else:
+            self.apply_theme(False)
+
+    def apply_theme(self, dark):
+        s = self.style
+        muted = DARK["muted"] if dark else "#666666"
+        if dark:
+            d = DARK
+            s.theme_use("clam")
+            self.configure(bg=d["bg"])
+            s.configure(".", background=d["bg"], foreground=d["fg"], fieldbackground=d["field"],
+                        bordercolor=d["border"], lightcolor=d["bg"], darkcolor=d["bg"],
+                        troughcolor=d["field"], focuscolor=d["bg"], insertcolor=d["fg"])
+            s.configure("TNotebook", background=d["bg"], bordercolor=d["border"])
+            s.configure("TNotebook.Tab", background=d["tab"], foreground=d["muted"], padding=(12, 4))
+            s.map("TNotebook.Tab", background=[("selected", d["bg"])], foreground=[("selected", d["fg"])])
+            s.configure("TButton", background=d["btn"], foreground=d["fg"], bordercolor=d["border"], padding=6)
+            s.map("TButton", background=[("active", d["btn_hot"]), ("disabled", d["bg"])],
+                  foreground=[("disabled", d["muted"])])
+            s.configure("TEntry", fieldbackground=d["field"], foreground=d["fg"], insertcolor=d["fg"])
+            s.configure("TSpinbox", fieldbackground=d["field"], foreground=d["fg"], background=d["btn"],
+                        arrowcolor=d["fg"], insertcolor=d["fg"], bordercolor=d["border"])
+            s.map("TSpinbox", fieldbackground=[("disabled", d["bg"])], foreground=[("disabled", d["muted"])])
+            for w in ("TCheckbutton", "TRadiobutton"):
+                s.configure(w, background=d["bg"], foreground=d["fg"], indicatorbackground=d["field"],
+                            indicatorforeground=d["fg"], upperbordercolor=d["border"],
+                            lowerbordercolor=d["border"])
+                s.map(w, background=[("active", d["bg"])], foreground=[("disabled", d["muted"])],
+                      indicatorcolor=[("selected", d["accent"]), ("!selected", d["field"])])
+        else:
+            s.theme_use(self._native_theme)
+            self.configure(bg=self._default_bg)
+        s.configure("Muted.TLabel", foreground=muted)
+        self._dark_titlebar(dark)
+
+    def _dark_titlebar(self, dark):
+        """Dark title bar on Windows 10/11."""
+        if not sys.platform.startswith("win"):
+            return
+        try:
+            import ctypes
+            self.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            val = ctypes.c_int(1 if dark else 0)
+            for attr in (20, 19):                 # 20 = Windows 11 / newer 10, 19 = older 10
+                if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        hwnd, attr, ctypes.byref(val), ctypes.sizeof(val)) == 0:
+                    break
+        except Exception:
+            pass
 
     # ---------------- shared widgets ----------------
     def _transpose_controls(self, parent, row, var_steps, var_acc):
         ttk.Label(parent, text="Transpose (semitones):").grid(row=row, column=0, sticky="w", pady=6)
         ttk.Spinbox(parent, from_=-11, to=11, width=5, textvariable=var_steps,
                     wrap=True).grid(row=row, column=1, sticky="w")
-        ttk.Label(parent, text="0 = leave as is", foreground="#777").grid(
+        ttk.Label(parent, text="0 = leave as is", style="Muted.TLabel").grid(
             row=row, column=2, sticky="w", padx=8)
         ttk.Label(parent, text="Chord names:").grid(row=row + 1, column=0, sticky="w")
         f = ttk.Frame(parent)
@@ -79,7 +195,7 @@ class App(tk.Tk):
         entry.focus()
 
         self.html_label = tk.StringVar(value="Download blocked? Use a saved page instead:")
-        ttk.Label(t, textvariable=self.html_label, foreground="#777").grid(
+        ttk.Label(t, textvariable=self.html_label, style="Muted.TLabel").grid(
             row=1, column=0, columnspan=2, sticky="w")
         ttk.Button(t, text="Choose file…", command=self.pick_html).grid(row=1, column=2, sticky="e")
 

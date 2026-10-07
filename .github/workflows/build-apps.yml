@@ -54,7 +54,7 @@ jobs:
       - name: Build app
         run: >
           pyinstaller --windowed --onefile --noconfirm --name "Chord Sheet Maker"
-          --icon "assets/AppIcon.ico"
+          --icon "assets/AppIcon.ico" --add-data "assets/AppIcon.ico;assets"
           --collect-data docx --collect-all reportlab --collect-all cloudscraper ug2docx_gui.py
 
       - uses: actions/upload-artifact@v4
