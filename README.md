@@ -5,6 +5,7 @@ Turns an Ultimate Guitar chord sheet into a clean, editable Word document (and o
 It comes as a small desktop app for Mac and Windows (no Python needed), and as a command-line script.
 
 > This is an unofficial personal tool and is not affiliated with Ultimate Guitar. Their terms of use restrict automated access, so use it for your own personal chord sheets.
+
 > Note: this tool is about 80% vibe-coded with Claude :)
 
 ---
