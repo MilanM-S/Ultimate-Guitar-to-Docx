@@ -1,9 +1,26 @@
 name: Build apps
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish as a download, e.g. v1.0 (leave empty to only test the build)"
+        required: false
+  push:
+    tags: ["v*"]            # pushing a tag such as v1.1 also publishes a release
+
+permissions:
+  contents: write           # needed to create the release
 
 jobs:
   mac:
-    runs-on: macos-latest        # Apple Silicon. For an Intel Mac use: macos-13
+    strategy:
+      matrix:
+        include:
+          - runner: macos-latest        # Apple Silicon (M1, M2, M3, M4...)
+            label: apple-silicon
+          - runner: macos-15-intel      # Intel Macs
+            label: intel
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - uses: actions/checkout@v4
@@ -24,12 +41,12 @@ jobs:
           --icon "assets/AppIcon.icns"
           --collect-data docx --collect-all reportlab --collect-all cloudscraper ug2docx_gui.py
 
-      - run: ditto -c -k --keepParent "dist/Chord Sheet Maker.app" ChordSheetMaker-mac.zip
+      - run: ditto -c -k --keepParent "dist/Chord Sheet Maker.app" ChordSheetMaker-mac-${{ matrix.label }}.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ChordSheetMaker-mac
-          path: ChordSheetMaker-mac.zip
+          name: ChordSheetMaker-mac-${{ matrix.label }}
+          path: ChordSheetMaker-mac-${{ matrix.label }}.zip
 
   windows:
     runs-on: windows-latest
@@ -57,7 +74,36 @@ jobs:
           --icon "assets/AppIcon.ico" --add-data "assets/AppIcon.ico;assets"
           --collect-data docx --collect-all reportlab --collect-all cloudscraper ug2docx_gui.py
 
+      - name: Give the file a download-friendly name
+        run: Move-Item "dist/Chord Sheet Maker.exe" "dist/ChordSheetMaker-windows.exe"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ChordSheetMaker-windows
-          path: dist/Chord Sheet Maker.exe
+          path: dist/ChordSheetMaker-windows.exe
+
+  release:
+    needs: [mac, windows]
+    if: ${{ github.event_name == 'push' || inputs.version != '' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version || github.ref_name }}
+          name: Chord Sheet Maker ${{ inputs.version || github.ref_name }}
+          body: |
+            **Mac with Apple Silicon (M1 or newer):** download `ChordSheetMaker-mac-apple-silicon.zip`, unzip, and open **Chord Sheet Maker.app**.
+            **Mac with an Intel processor:** download `ChordSheetMaker-mac-intel.zip` and do the same.
+            Not sure which Mac you have? Click the Apple menu > About This Mac and look for "Chip" (Apple Silicon) or "Processor" (Intel).
+            **Windows:** download `ChordSheetMaker-windows.exe` and double-click it.
+
+            The apps are unsigned, so your system will warn you the first time. See the README for how to open them.
+          files: |
+            artifacts/ChordSheetMaker-mac-apple-silicon/ChordSheetMaker-mac-apple-silicon.zip
+            artifacts/ChordSheetMaker-mac-intel/ChordSheetMaker-mac-intel.zip
+            artifacts/ChordSheetMaker-windows/ChordSheetMaker-windows.exe
